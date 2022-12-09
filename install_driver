@@ -1,0 +1,5 @@
+
+rmmod nvme 2>/dev/null
+rmmod nvme-core 2>/dev/null
+
+insmod nvme.ko
