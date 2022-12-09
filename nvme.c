@@ -69,12 +69,11 @@ struct nvme_completion_message_queue{
 
 static struct nvme_completion_message_queue end_message_queue = {.head = 0, .tail = 0,};
 
-#define TIMER_CNT (200)
-static struct timer_list timerl;
+//#define TIMER_CNT (200)
+//static struct timer_list timerl;
 
-// 
+#if 0 
 static void timer_handler(struct timer_list *t){
- #if 0   
     while(end_message_queue. head != end_message_queue. tail){
         tprintk("%.2lu:%.2lu:%.2lu:%.6lu: Command id: 0x%x,  Status: 0x%x, phase tag %d\n", 
                 (end_message_queue.time[end_message_queue. tail].tv_sec / 3600) % (24),
@@ -100,10 +99,11 @@ static void timer_handler(struct timer_list *t){
             start_message_queue. tail = 0;        
         }
     }
-#endif
-    timerl.expires = jiffies + TIMER_CNT;
-    add_timer(&timerl);
+    //timerl.expires = jiffies + TIMER_CNT;
+    //add_timer(&timerl);
 }
+#endif
+
 
 struct nvme_queue{
     struct nvme_command *sq_cmds;           // SQの仮想アドレス
@@ -149,8 +149,9 @@ struct nvme_dev{
     struct nvme_queue *padminQ;
     struct nvme_queue *pioQ[NUM_OF_IO_QUEUE_PAIR];
 
-    struct dma_pool *prp_page_pool_first; // 最初のprp list
-    struct dma_pool *prp_page_pool_later; // 2番め以降のprp list
+    struct dma_pool *prp_page_pool;
+    //struct dma_pool *prp_page_pool_first; // 最初のprp list
+    //struct dma_pool *prp_page_pool_later; // 2番め以降のprp list
 
     //identify が応答するかお試しで作成したData Buffer
     dma_addr_t prp1_dma_addr;   //物理アドレス   
@@ -342,10 +343,10 @@ static int set_prps(struct nvme_command *pcmd, struct nvme_dev *pnvme_dev){
     struct page **pages = NULL;
     unsigned long udata;
     unsigned long len;
-    long npages = 0;
+    long npages = 0, npages_list = 0;
     unsigned fp_offset; // first page offset
 
-    int i, j;
+    int i, j, k=0;
     int start_size;
     unsigned page_len;
 
@@ -353,12 +354,14 @@ static int set_prps(struct nvme_command *pcmd, struct nvme_dev *pnvme_dev){
     int dma_len;
     u64 dma_addr;
     unsigned long num_sg;
-    
+
+    //struct dma_pool *pool;
     dma_addr_t prp_dma;
     __le64 *prp_list, *old_prp_list;
     enum dma_data_direction dir;
-
+    int list_max;
     long val;
+    __le64 *list[64];
 
     pnvme_dev->wait_condition = 0;
 
@@ -421,10 +424,46 @@ static int set_prps(struct nvme_command *pcmd, struct nvme_dev *pnvme_dev){
 
     }
 
-    pcmd->rw.dptr.prp1 = cpu_to_le64(pages[0]-> private); 
+    pcmd->rw.dptr.prp1 = cpu_to_le64(pages[0]-> private);
+    if(npages == 2){ 
+        pcmd->rw.dptr.prp2 = cpu_to_le64(pages[1]-> private); 
+    }
+    else if(npages > 2){
+        tprintk("Create 1st PRP List\n");
+        prp_list = dma_pool_alloc(pnvme_dev->prp_page_pool, GFP_KERNEL, &prp_dma);
+        list[0] = prp_list;
+        pcmd->rw.dptr.prp2 = cpu_to_le64(prp_dma);
+        list_max = PAGE_SIZE/sizeof(__le64) -1;
+        npages_list = npages -1;
+        i=0;
+        j=1;
+        k=1;
+        while(npages_list--){
+            if(i == list_max){
+                tprintk("Create %d PRP List\n", k+1);
+                old_prp_list = prp_list;
+                prp_list = dma_pool_alloc(pnvme_dev->prp_page_pool, GFP_KERNEL, &prp_dma);
+                old_prp_list[i] =  cpu_to_le64(prp_dma);
+                list[k++] = prp_list;
+                i = 0;
+            }
+            prp_list[i] = cpu_to_le64(pages[j]->private);
+            i++;
+            j++;
+        }
+    }
+
     submitCmd(pcmd, pnvme_dev->pioQ[pnvme_dev->io_qid]);
 
-   // val = wait_event_interruptible_timeout(pnvme_dev->sdma_q, pnvme_dev->wait_condition == 1, TIMEOUT); //割り込み処理が完了してwait解除されるまで待ち
+    val = wait_event_interruptible_timeout(pnvme_dev->sdma_q, pnvme_dev->wait_condition == 1, TIMEOUT); //割り込み処理が完了してwait解除されるまで待ち
+
+    for (i = 0; i < k; i++) {
+        tprintk("Free DMA Pool\n");
+		__le64 *prp_list = list[i];
+		dma_addr_t next_prp_dma = le64_to_cpu(prp_list[list_max]);
+		dma_pool_free(pnvme_dev->prp_page_pool, prp_list, prp_dma);
+		prp_dma = next_prp_dma;
+	}
 
     for(i=0; i<npages; i++){
         if(i==0) dma_unmap_page(&pnvme_dev -> pdev-> dev, page_private(pages[i]), start_size, dir);
@@ -525,8 +564,8 @@ static irqreturn_t nvme_irq(int irq, void *data)
         }
    }
 
-    //nvmeq->pnvme_dev->wait_condition = 1;
-    //wake_up_interruptible(&nvmeq->pnvme_dev->sdma_q);    
+    nvmeq->pnvme_dev->wait_condition = 1;
+    wake_up_interruptible(&nvmeq->pnvme_dev->sdma_q);    
 
     if (head == nvmeq->cq_head && phase == nvmeq->cq_phase)
 		return IRQ_NONE;
@@ -790,17 +829,17 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
 
     // prp listの作成
-    pnvme_dev->prp_page_pool_first = dma_pool_create("prp list first", &pnvme_dev->pdev->dev, PAGE_SIZE, 8, 0);
-    if (!pnvme_dev->prp_page_pool_first) {
+    pnvme_dev->prp_page_pool = dma_pool_create("prp list", &pnvme_dev->pdev->dev, PAGE_SIZE, PAGE_SIZE, 0);
+    if (!pnvme_dev->prp_page_pool) {
 		ret = -ENOMEM;
-        goto out_create_dma_pool_first;
+        goto out_create_dma_pool;
 	}
 
-    pnvme_dev->prp_page_pool_later = dma_pool_create("prp list second", &pnvme_dev->pdev->dev, PAGE_SIZE, PAGE_SIZE, 0);
-    if (!pnvme_dev->prp_page_pool_first) {
-		ret = -ENOMEM;
-        goto out_create_dma_pool_later;
-	}
+    //pnvme_dev->prp_page_pool_later = dma_pool_create("prp list second", &pnvme_dev->pdev->dev, PAGE_SIZE, PAGE_SIZE, 0);
+    //if (!pnvme_dev->prp_page_pool_first) {
+//		ret = -ENOMEM;
+  //      goto out_create_dma_pool_later;
+	//}
 
     //割り込みハンドラーの設定 Admin CQ
     ret = pci_request_irq(pdev, padminQ->cq_vector, nvme_irq, NULL, padminQ, "nvme%dadminq%d", pnvme_dev->instance, padminQ->qid);
@@ -876,12 +915,12 @@ out_pci_request_irq_io:
     pci_free_irq(pdev, padminQ->cq_vector, pnvme_dev->padminQ);
 
 out_pci_request_irq_admin:
-    dma_pool_destroy(pnvme_dev->prp_page_pool_later);   
+    dma_pool_destroy(pnvme_dev->prp_page_pool);   
 
-out_create_dma_pool_later:
-    dma_pool_destroy(pnvme_dev->prp_page_pool_first);
+//out_create_dma_pool_later:
+ //   dma_pool_destroy(pnvme_dev->prp_page_pool_first);
 
-out_create_dma_pool_first:
+out_create_dma_pool:
     dma_free_coherent(&pnvme_dev->pdev->dev, sizeof(struct nvme_id_ctrl), (void *)pnvme_dev->prp1_virt_addr, pnvme_dev ->prp1_dma_addr);
 
 out_wait_ready_timeout:
@@ -965,8 +1004,8 @@ static void nvmet_pci_remove(struct pci_dev* pdev){
     
     pci_free_irq(pdev, pnvme_dev->padminQ->cq_vector, pnvme_dev ->padminQ);
 
-    dma_pool_destroy(pnvme_dev->prp_page_pool_later);   
-    dma_pool_destroy(pnvme_dev->prp_page_pool_first);
+    dma_pool_destroy(pnvme_dev->prp_page_pool);   
+   // dma_pool_destroy(pnvme_dev->prp_page_pool_first);
 
     dma_free_coherent(&pnvme_dev->pdev->dev, sizeof(struct nvme_id_ctrl), (void *)pnvme_dev->prp1_virt_addr, pnvme_dev ->prp1_dma_addr);
 
@@ -1048,9 +1087,9 @@ static int nvmet_init(void) {
         return ret;
     }
 
-    timer_setup(&timerl, timer_handler, 0);
-    timerl.expires = jiffies + TIMER_CNT;
-    add_timer(&timerl);
+    //timer_setup(&timerl, timer_handler, 0);
+    //timerl.expires = jiffies + TIMER_CNT;
+    //add_timer(&timerl);
 
     return ret; 
 }
@@ -1058,7 +1097,7 @@ static int nvmet_init(void) {
 /* アンインストール時に実行 */
 static void nvmet_exit(void) {
 
-    del_timer(&timerl);
+    //del_timer(&timerl);
 
     pci_unregister_driver(&simple_nvme_driver);  //ドライバー名、table, コールバック関数(probe, remove)を削除  
     class_destroy(nvme_class);
