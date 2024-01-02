@@ -1,0 +1,1 @@
+cmd_/home/ttt/main/nvme.ko := ld -r -m elf_x86_64  -z max-page-size=0x200000 -z noexecstack   --build-id  -T ./scripts/module-common.lds -o /home/ttt/main/nvme.ko /home/ttt/main/nvme.o /home/ttt/main/nvme.mod.o;  true

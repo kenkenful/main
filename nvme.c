@@ -791,7 +791,7 @@ static int nvmet_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		msleep(100);
 		if (time_after(jiffies, timeout)) {
 			dev_err(&pnvme_dev->pdev->dev,
-				"Device shutdown incomplete; abort shutdown\n");
+				"Device shutdownn incomplete; abort shutdown\n");
 			return -ENODEV;
 		}
 	}
@@ -1049,7 +1049,8 @@ static void nvme_shutdown(struct pci_dev *pdev)
 		if (time_after(jiffies, timeout)) {
 			dev_err(&pnvme_dev->pdev->dev,
 				"Device shutdown incomplete; abort shutdown\n");
-			return -ENODEV;
+			//			return -ENODEV;
+			return;
 		}
 	}
 }
